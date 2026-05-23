@@ -1,0 +1,15 @@
+# Ignore the Python virtual environment
+es_env310/
+es_env310/Scripts/
+es_env310/Lib/
+
+# Ignore compiled Python files
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore local system/IDE settings
+.vscode/
+.idea/
+*.log
