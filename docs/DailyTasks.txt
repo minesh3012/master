@@ -1,0 +1,361 @@
+# AI Trading System — Operations Guide
+## KalmanConfluenceExitStrategy v8 + AI Gatekeeper
+
+---
+
+## 1. SYSTEM OVERVIEW
+
+```
+NinjaTrader (NT8)                    VS Code / PowerShell
+─────────────────                    ──────────────────────
+KalmanConfluenceExitStrategy_v8      python\server\api_server.py
+  │                                    │
+  │  POST /predict (features)          │  XGBoost model
+  │ ─────────────────────────────────► │  scores each trade
+  │                                    │
+  │  {approved, confidence}            │
+  │ ◄───────────────────────────────── │
+  │
+  ├── approved=true  → EnterLong/Short
+  └── approved=false → skip trade
+
+  Every trade close → CSV row written to data\raw\
+```
+
+---
+
+## 2. THE SERVER WINDOW
+
+### What it is
+The "server window" is a PowerShell terminal in VS Code running
+`python python\server\api_server.py`. It must stay open while NT8 is trading.
+It prints every prediction in real time so you can see what the AI is doing.
+
+### How to open it in VS Code
+1. Open VS Code
+2. Press **Ctrl+` ** (backtick) to open the integrated terminal
+3. You can open multiple terminals — click the **+** icon in the terminal panel
+   or press **Ctrl+Shift+`**
+4. Name them by right-clicking the terminal tab:
+   - Terminal 1: "AI Server"
+   - Terminal 2: "Training / Tools"
+
+### How to start the server
+In the "AI Server" terminal:
+```
+cd C:\Trading\Projects\NTAITrading
+es\Scripts\Activate.ps1
+python python\server\api_server.py
+```
+
+You should see:
+```
+INFO:  Model loaded: ...kalman_latest.pkl  trained_at=...
+INFO:  Uvicorn running on http://127.0.0.1:8000
+```
+Leave this terminal running. Do NOT close it while trading.
+
+### How to restart the server
+In the "AI Server" terminal:
+1. Press **Ctrl+C** to stop it
+2. Run the start command again:
+```
+python python\server\api_server.py
+```
+
+### What you see while trading
+Every trade signal from NT8 prints a line like:
+```
+INFO  predict  conf=0.623  thr=0.58  APPROVE  12.3ms  total=14  blocked=28.6%
+INFO  predict  conf=0.421  thr=0.58  BLOCK    11.1ms  total=15  blocked=33.3%
+```
+- `conf` = model confidence (0.0–1.0)
+- `APPROVE` = trade allowed through
+- `BLOCK`   = trade skipped
+- `blocked` = running % of trades blocked today
+
+### If the server crashes or you forget to start it
+NT8 fails-open — all trades proceed as if AI filter is off.
+You will see connection errors in NT8 output window but no trades are lost.
+
+---
+
+## 3. DAILY CSV FILES — RETRAINING
+
+### Do you need to combine files manually?
+**No.** The training script reads ALL CSV files in `data\raw\` automatically
+and combines them. Just leave every file in that folder.
+
+### File naming
+Each backtest or live session creates one file:
+```
+data\raw\ES_06-26_Kalman_20260609_143955.csv   ← backtest
+data\raw\ES_06-26_Kalman_20260610_090012.csv   ← live session day 1
+data\raw\ES_06-26_Kalman_20260611_090008.csv   ← live session day 2
+```
+All files are loaded and merged automatically during training.
+
+### How retraining works
+```
+python python\training\train_model.py --data data\raw\ --threshold 0.58
+```
+This reads every .csv in data\raw\, sorts all rows by date, does
+walk-forward CV, trains the final model, and overwrites
+`python\models\kalman_latest.pkl`.
+
+Then reload without restarting the server:
+```
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/reload" -Method Post | ConvertTo-Json
+```
+
+### Recommended retraining schedule
+- **Monthly** — after ~300 new live trades
+- **After any major market event** — Fed decisions, crashes, regime changes
+- **If live win rate drops 5%+ below expected** — model may be degrading
+
+---
+
+## 4. VIRTUAL ENVIRONMENT (venv)
+
+### Yes — always activate es before running Python
+The venv `es` contains all required packages (fastapi, xgboost, etc.)
+Without activating it, Python won't find these packages.
+
+### Activating in VS Code terminal
+```
+cd C:\Trading\Projects\NTAITrading
+es\Scripts\Activate.ps1
+```
+You will see `(es)` at the start of your prompt confirming it is active.
+
+### One-time fix if activation is blocked
+```
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+Only needed once per machine.
+
+### Does it stay active?
+Only for that terminal session. Each new terminal window needs activation.
+The server terminal and the tools terminal both need it.
+
+### Tip: VS Code workspace settings
+You can set the default terminal to auto-activate by adding to
+`.vscode\settings.json` in the project root:
+```json
+{
+    "python.defaultInterpreterPath": "C:\\Trading\\Projects\\NTAITrading\\es\\Scripts\\python.exe",
+    "terminal.integrated.env.windows": {
+        "VIRTUAL_ENV": "C:\\Trading\\Projects\\NTAITrading\\es"
+    }
+}
+```
+
+---
+
+## 5. DAILY STARTUP CHECKLIST
+
+Run through this every morning before the session:
+
+### Step 1 — Open VS Code terminal (Ctrl+`)
+```
+cd C:\Trading\Projects\NTAITrading
+es\Scripts\Activate.ps1
+```
+Confirm: `(es)` appears in prompt
+
+### Step 2 — Start the AI server
+```
+python python\server\api_server.py
+```
+Confirm: `Uvicorn running on http://127.0.0.1:8000`
+
+### Step 3 — Verify server health
+Open a second terminal (Ctrl+Shift+`) and run:
+```
+cd C:\Trading\Projects\NTAITrading
+es\Scripts\Activate.ps1
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/health" -Method Get | ConvertTo-Json
+```
+Confirm:
+- `"status": "ok"`
+- `"model_loaded": true`
+- `"threshold": 0.58`
+- `"features"` shows 14 items
+
+### Step 4 — Open NT8
+Load `KalmanConfluenceExitStrategy_v8` on ES 1-min chart.
+Confirm parameters:
+- Enable AI Filter = **true**
+- AI Server URL = `http://127.0.0.1:8000/predict`
+- AI Min Confidence = **0.58**
+- Enable CSV Logging = **true**
+
+### Step 5 — Send a test prediction
+```
+$body = '{"features":[0.0005,0.8,0.6,0.4,0.2,0.1,1.2,0.6,0.4,0.5,0.5,0.0,1.0,0.5]}'
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/predict" -Method Post -ContentType "application/json" -Body $body | ConvertTo-Json
+```
+Confirm: response contains `approved`, `confidence`, `threshold`
+
+### Step 6 — Watch first few trades
+In the server terminal watch for APPROVE/BLOCK lines as signals fire.
+First trade of the day confirms end-to-end connection is working.
+
+---
+
+## 6. WEEKLY/MONTHLY MAINTENANCE
+
+### Check model performance
+```
+cd C:\Trading\Projects\NTAITrading
+es\Scripts\Activate.ps1
+python -c "
+import pandas as pd, glob
+files = sorted(glob.glob('data/raw/*.csv'))
+# Only live files (skip the original backtest)
+live = [f for f in files if '143955' not in f]
+if not live:
+    print('No live files yet')
+else:
+    df = pd.concat([pd.read_csv(f) for f in live])
+    print(f'Live trades: {len(df)}')
+    print(f'Live win rate: {df[\"Outcome\"].mean():.1%}')
+    print(f'Expected win rate: ~61.7%')
+    diff = df['Outcome'].mean() - 0.617
+    if diff < -0.05:
+        print('WARNING: win rate degraded — consider retraining')
+    else:
+        print('OK: within expected range')
+"
+```
+
+### Retrain (do this monthly or after 300+ new trades)
+```
+python python\training\train_model.py --data data\raw\ --threshold 0.58
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/reload" -Method Post | ConvertTo-Json
+```
+Confirm reload response shows new `trained_at` timestamp.
+
+### Adjust threshold without retraining
+Too many trades blocked (block_rate > 50%):
+```
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/threshold/0.55" -Method Get | ConvertTo-Json
+```
+Too few trades blocked (win rate not improving):
+```
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/threshold/0.62" -Method Get | ConvertTo-Json
+```
+
+---
+
+## 7. CROSS-CHECK VERIFICATION TABLE
+
+After the first live session, verify these match expectations:
+
+| Check | How to verify | Expected |
+|---|---|---|
+| Server running | Health endpoint returns `status: ok` | Always before trading |
+| Model loaded | Health shows `model_loaded: true` | Always before trading |
+| NT8 connected | First APPROVE/BLOCK line in server terminal | Within first signal |
+| Block rate | Server terminal running blocked% | 30–50% of signals |
+| Live win rate (week 1) | Python check script above | 55–65% |
+| CSV growing | Check file size in data\raw\ after session | New rows each day |
+| PnlTicks sane | Open CSV, PnlTicks column | Small numbers -100 to +1000 |
+
+---
+
+## 8. TROUBLESHOOTING
+
+### "No module named fastapi" or similar
+You forgot to activate the venv:
+```
+es\Scripts\Activate.ps1
+```
+
+### Server starts but NT8 can't connect
+- Check AIServerUrl in strategy = `http://127.0.0.1:8000/predict`
+- Check Windows Firewall is not blocking port 8000
+- Check server terminal — is it still running?
+
+### All trades showing as APPROVE (block rate = 0%)
+- AI Filter may be off in NT8 parameters — check Enable AI Filter = true
+- Server may have crashed and failed-open — check server terminal
+
+### All trades showing as BLOCK (block rate = 100%)
+- Threshold too high — lower it:
+  ```
+  Invoke-RestMethod -Uri "http://127.0.0.1:8000/threshold/0.50" -Method Get
+  ```
+- Feature mismatch — check server logs for 422 errors
+
+### "422 Unprocessable Entity" in server logs
+Feature count mismatch between NT8 and server.
+NT8 is sending wrong number of features.
+Check v8 strategy BuildFeatureVector returns exactly 14 values.
+
+### Win rate drops below 50% for 2+ weeks
+Model has degraded. Retrain immediately with all available data.
+
+### Server shows 422 error: "Expected 14 features, got 18"
+The NT8 strategy is sending the old 18-feature vector.
+Make sure you are running v8 (not an older version) and recompile in NT8.
+
+---
+
+## 9. FILE REFERENCE
+
+```
+C:\Trading\Projects\NTAITrading\
+│
+├── es\                              ← Python virtual environment
+│   └── Scripts\Activate.ps1        ← run this to activate
+│
+├── data\
+│   └── raw\                        ← all CSV trade files live here
+│       ├── ES_06-26_Kalman_*_backtest.csv
+│       └── ES_06-26_Kalman_*_live.csv
+│
+├── python\
+│   ├── server\
+│   │   └── api_server.py           ← START THIS EVERY DAY
+│   ├── training\
+│   │   └── train_model.py          ← run monthly to retrain
+│   └── models\
+│       ├── kalman_latest.pkl       ← server loads this
+│       ├── kalman_xgb_*.pkl        ← versioned backups
+│       └── model_meta.json         ← metadata / threshold
+│
+├── ninjatrader\
+│   └── Strategies\
+│       └── KalmanConfluenceExitStrategy_v8.cs  ← copy to NT8 Custom
+│
+└── docs\
+    ├── OPERATIONS_GUIDE.md         ← this file
+    └── SETUP_v8.md                 ← initial setup steps
+```
+
+---
+
+## 10. QUICK REFERENCE CARD
+
+```
+EVERY DAY BEFORE TRADING:
+  1. cd C:\Trading\Projects\NTAITrading
+  2. es\Scripts\Activate.ps1
+  3. python python\server\api_server.py
+  4. Verify: http://127.0.0.1:8000/health  (in browser or PowerShell)
+  5. Start NT8 with Enable AI Filter = true
+
+MONTHLY RETRAINING:
+  1. python python\training\train_model.py --data data\raw\ --threshold 0.58
+  2. Invoke-RestMethod -Uri "http://127.0.0.1:8000/reload" -Method Post | ConvertTo-Json
+
+ADJUST THRESHOLD (no restart):
+  Invoke-RestMethod -Uri "http://127.0.0.1:8000/threshold/0.60" -Method Get
+
+CHECK HEALTH:
+  Invoke-RestMethod -Uri "http://127.0.0.1:8000/health" -Method Get | ConvertTo-Json
+
+RESTART SERVER:
+  Ctrl+C  then  python python\server\api_server.py
+```

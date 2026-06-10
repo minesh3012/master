@@ -1,0 +1,22 @@
+# Virtual environment
+es/
+
+# Large data files — keep structure, not data
+data/raw/*.csv
+data/processed/*.csv
+
+# Model files
+python/models/*.pkl
+python/models/*.json
+
+# NT8 compiled files
+ninjatrader/**/*.dll
+ninjatrader/**/*.pdb
+
+# VS Code
+.vscode/settings.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

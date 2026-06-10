@@ -1,0 +1,100 @@
+# KalmanConfluenceExitStrategy v8 — Setup Guide
+
+## Step 1 — NinjaTrader: generate training data
+
+1. Copy `KalmanConfluenceExitStrategy_v8.cs` to:
+   `Documents/NinjaTrader 8/bin/Custom/Strategies/`
+
+2. Compile in NT8 (NinjaScript Editor → Compile)
+
+3. Load on ES 1-min chart with these settings:
+   - Enable CSV Logging = **true**
+   - Log Folder = `C:\Trading\Projects\NTAITrading\data\raw`
+   - Enable AI Filter = **false** (backtest mode — pure mechanical)
+   - All other settings = same as your validated v7 defaults
+
+4. Run backtest: Jan 2025 → Jun 2026
+   CSV file appears in `data\raw\ES_Kalman_YYYYMMDD_HHMMSS.csv`
+   One row per completed trade with all features + Outcome column
+
+5. For live ongoing retraining:
+   Keep CSV Logging = true in live trading
+   New rows append daily — retrain monthly or after 500 new trades
+
+## Step 2 — Python: install dependencies
+
+```
+cd C:\Trading\Projects\NTAITrading\python
+pip install fastapi uvicorn scikit-learn xgboost numpy pandas
+```
+
+## Step 3 — Train the model
+
+```
+cd python/training
+python train_model.py --data ../../data/raw/ --threshold 0.55
+```
+
+Output shows threshold table — pick the threshold where:
+- Losers blocked > 25%
+- Winners blocked < 10%
+- Coverage > 60% (don't over-filter)
+
+Saved to: `python/models/kalman_latest.pkl`
+
+## Step 4 — Start the AI server
+
+```
+cd python/server
+python api_server.py
+```
+
+Server runs at http://127.0.0.1:8000
+Check health: http://127.0.0.1:8000/health
+
+## Step 5 — Enable AI filter in NinjaTrader
+
+Change strategy parameters:
+- Enable AI Filter = **true**
+- AI Server URL = `http://127.0.0.1:8000/predict`
+- AI Min Confidence = 0.55 (match your chosen threshold)
+
+Run live. Server must be running before NT8 connects.
+If server goes down: strategy fails-open (all trades proceed).
+
+## Feature parity guarantee
+
+These 18 features are computed IDENTICALLY in NT8 (C#) and Python training:
+
+| # | Feature | Description |
+|---|---------|-------------|
+| 0 | KalmanSlope | (kalmanState - kalmanStatePrev) / ATR |
+| 1 | ZlsmaSlope | (zlsma - zlsmaPrev) / ATR |
+| 2 | AtrNorm | ATR / Close |
+| 3 | DistKalman | (Close - kalmanState) / ATR |
+| 4 | DistZlsma | (Close - zlsma) / ATR |
+| 5 | BodyRatio | abs(Close-Open) / (High-Low) |
+| 6 | UpperWick | (High - max(O,C)) / range |
+| 7 | LowerWick | (min(O,C) - Low) / range |
+| 8 | BarRangeAtr | (High-Low) / ATR |
+| 9 | VolPct | Volume percentile vs 50-bar lookback |
+| 10 | TodMinutes | Minutes since session start / 330 |
+| 11 | IsLong | 1=long, 0=short |
+| 12 | ChandLongNorm | (Close - chandLong) / ATR |
+| 13 | ChandShortNorm | (chandShort - Close) / ATR |
+| 14 | UnrealizedAtr | Always 0.0 at entry |
+| 15 | WideStopActive | 1 if profit lock triggered |
+| 16 | InOpenWindow | 1 if in TOD window |
+| 17 | CScoreEntry | Fraction of ConsecutiveBars above both indicators |
+
+## Retraining schedule
+
+- Monthly: append new live trades CSV, re-run train_model.py
+- POST http://127.0.0.1:8000/reload  (no restart needed)
+- Monitor: GET http://127.0.0.1:8000/health — watch block_rate
+  - block_rate < 5%: threshold too low, raise it
+  - block_rate > 50%: threshold too high or model degraded, retrain
+
+## Adjusting threshold live (no restart)
+
+GET http://127.0.0.1:8000/threshold/0.60
